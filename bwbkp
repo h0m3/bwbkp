@@ -7,32 +7,32 @@
 #
 
 program_name="${0}"
-z
+uid="${UID}"
+user="${USER}"
+
 # Check if a command exists
-function command_exists() {
-    command -v ${0} &> /dev/null
+command_exists() {
+    command -v ${0} 2>&1 > /dev/null
 }
 
 # Log a message
-function log() {
+log() {
     echo "[${program_name}] ${@}"
 }
 
 # Log a error message
-function error() {
+error() {
     echo "[${program_name}] ${@}" > /dev/stderr
 }
 
 # Get temporary directory based on availability of temporary mount points
 # If thers none available use user home dir
-function get_temp() {
+get_temp() {
     if [ -d "${BWBKP_TEMP_DIR}" ]; then
         echo "${BWBKP_TEMP_DIR}/${@}"
-    elif [ -d "/run/user/${UID}" ] && df "/run/user/${UID}" | grep -i tmpfs &> /dev/null; then
-        echo "/run/user/${UID}/${@}"
-    elif [ -d "/dev/shm" ] && df /dev/shm | grep -i tmpfs &> /dev/null; then
+    elif [ -d "/dev/shm" ] && df /dev/shm | grep -i tmpfs 2>&1 > /dev/null; then
         echo "/dev/shm/${@}"
-    elif [ -d "/tmp" ] && df /dev/shm | grep -i tmpfs &> /dev/null; then
+    elif [ -d "/tmp" ] && df /dev/shm | grep -i tmpfs 2>&1 > /dev/null; then
         echo "/tmp/${@}"
     else
         echo "${HOME}/${@}"
@@ -40,7 +40,7 @@ function get_temp() {
 }
 
 # Logout from everything and remove all variables even if they aren't exported
-function exit_all() {
+exit_all() {
     export BW_PASSWORD=""
     export BW_PASSWORD_FILE=""
     export PASSWORD=""
@@ -53,12 +53,12 @@ function exit_all() {
 }
 
 # Get bitwarden status
-function  bw_status() {
+bw_status() {
     bw status --pretty | grep -i status | cut -d ":" -f 2 | sed 's/\"//g' | sed 's/ //g'
 }
 
 # Ask for password
-function ask_password() {
+ask_password() {
     echo -n "${@}"
     trap 'stty echo' INT EXIT
     stty -echo
@@ -67,15 +67,15 @@ function ask_password() {
 }
 
 # Create secure directory with minimal permissions
-function create_dir() {
+create_dir() {
     mkdir -pv "${@}"
-    chown -R ${USER} "${@}"
+    chown -R ${user} "${@}"
     chmod -R 700 "${@}"
 }
 
 
 # Check if backup file is supplied
-if [ "${1}" == "" ]; then
+if [ "${1}" = "" ]; then
     error "please supply a filename to the encrypted backup"
     error "try ${program_name} backup.json.gpg"
     exit 1
@@ -97,7 +97,7 @@ if ! command_exists gpg; then
 fi
 
 # Login to bitwarden with API key
-if [ "$(bw_status)" == "unauthenticated" ]; then
+if [ "$(bw_status)" = "unauthenticated" ]; then
     log "bitwarden vault is unauthenticated, logging in to bitwarden using API key"
     if ! bw login --apikey > /dev/null; then
         error "bitwarden login failed, check out 'https://bitwarden.com/help/cli/#using-an-api-key'"
@@ -106,7 +106,7 @@ if [ "$(bw_status)" == "unauthenticated" ]; then
 fi
 
 # Look for bitwarden password file
-if [ ! -z ${BW_PASSWORD_FILE} ]; then
+if [ ! -z "${BW_PASSWORD_FILE}" ]; then
     log "using '${BW_PASSWORD_FILE}' as password"
     if ! export BW_PASSWORD="$(cat '${BW_PASSWORD_FILE}')"; then
         error "failed to read '${BW_PASSWORD_FILE}'"
@@ -116,16 +116,23 @@ fi
 
 # Look for bitwarden password environment
 # Ask if doesn't exists
-if [ -z ${BW_PASSWORD} ]; then
+if [ -z "${BW_PASSWORD}" ]; then
     log "BW_PASSWORD seems empty, asking for password"
     ask_password "[${program_name}] bitwarden password: "
     export BW_PASSWORD="${PASSWORD}"
 fi
 
+# Check if password was written
+if [ -z "${BW_PASSWORD}" ]; then
+    error "password is still empty, it shoudn't"
+    exit_all 1
+fi
+
 # Unlock bitwarden vault using BW_PASSWORD
 # Get BW_SESSION
 log "unlocking bitwarden vault"
-if ! export BW_SESSION="$(bw unlock --passwordenv BW_PASSWORD | grep -i "bw list items \-\-session" | cut -d " " -f 6)" || [ "${BW_SESSION}" == "" ]; then
+export BW_SESSION="$(bw unlock --passwordenv BW_PASSWORD | grep -i "bw list items \-\-session" | cut -d " " -f 6)"
+if [ "$?" != "0" ] || [ "${BW_SESSION}" = "" ]; then
     error "failed to unlock bitwarden vault"
     exit_all 1
 fi
