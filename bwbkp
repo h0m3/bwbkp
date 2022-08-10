@@ -1,0 +1,164 @@
+#!/bin/sh
+# Simple shell script to backup bitwarden
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+
+program_name="${0}"
+z
+# Check if a command exists
+function command_exists() {
+    command -v ${0} &> /dev/null
+}
+
+# Log a message
+function log() {
+    echo "[${program_name}] ${@}"
+}
+
+# Log a error message
+function error() {
+    echo "[${program_name}] ${@}" > /dev/stderr
+}
+
+# Get temporary directory based on availability of temporary mount points
+# If thers none available use user home dir
+function get_temp() {
+    if [ -d "${BWBKP_TEMP_DIR}" ]; then
+        echo "${BWBKP_TEMP_DIR}/${@}"
+    elif [ -d "/run/user/${UID}" ] && df "/run/user/${UID}" | grep -i tmpfs &> /dev/null; then
+        echo "/run/user/${UID}/${@}"
+    elif [ -d "/dev/shm" ] && df /dev/shm | grep -i tmpfs &> /dev/null; then
+        echo "/dev/shm/${@}"
+    elif [ -d "/tmp" ] && df /dev/shm | grep -i tmpfs &> /dev/null; then
+        echo "/tmp/${@}"
+    else
+        echo "${HOME}/${@}"
+    fi
+}
+
+# Logout from everything and remove all variables even if they aren't exported
+function exit_all() {
+    export BW_PASSWORD=""
+    export BW_PASSWORD_FILE=""
+    export PASSWORD=""
+    unset BW_PASSWORD BW_PASSWORD_FILE PASSWORD
+    bw lock
+    export BW_SESSION=""
+    unset BW_SESSION
+    rm -rfv "$(get_temp bwbkp)"
+    exit ${1}
+}
+
+# Get bitwarden status
+function  bw_status() {
+    bw status --pretty | grep -i status | cut -d ":" -f 2 | sed 's/\"//g' | sed 's/ //g'
+}
+
+# Ask for password
+function ask_password() {
+    echo -n "${@}"
+    trap 'stty echo' INT EXIT
+    stty -echo
+    read PASSWORD
+    echo
+}
+
+# Create secure directory with minimal permissions
+function create_dir() {
+    mkdir -pv "${@}"
+    chown -R ${USER} "${@}"
+    chmod -R 700 "${@}"
+}
+
+
+# Check if backup file is supplied
+if [ "${1}" == "" ]; then
+    error "please supply a filename to the encrypted backup"
+    error "try ${program_name} backup.json.gpg"
+    exit 1
+fi
+destination="${1}"
+
+# Check if 'bw' exists
+log "looking for bitwarden-cli"
+if ! command_exists bw; then
+    error "bitwarden-cli 'bw' command not found. Check out 'https://bitwarden.com/help/cli/'"
+    exit 1
+fi
+
+# Check if 'gpg' exists
+log "looking for gpg utility"
+if ! command_exists gpg; then
+    error "gpg was not found. Check out 'https://gnupg.org/'"
+    exit 1
+fi
+
+# Login to bitwarden with API key
+if [ "$(bw_status)" == "unauthenticated" ]; then
+    log "bitwarden vault is unauthenticated, logging in to bitwarden using API key"
+    if ! bw login --apikey > /dev/null; then
+        error "bitwarden login failed, check out 'https://bitwarden.com/help/cli/#using-an-api-key'"
+        exit_all 1
+    fi
+fi
+
+# Look for bitwarden password file
+if [ ! -z ${BW_PASSWORD_FILE} ]; then
+    log "using '${BW_PASSWORD_FILE}' as password"
+    if ! export BW_PASSWORD="$(cat '${BW_PASSWORD_FILE}')"; then
+        error "failed to read '${BW_PASSWORD_FILE}'"
+        exit_all 1
+    fi
+fi
+
+# Look for bitwarden password environment
+# Ask if doesn't exists
+if [ -z ${BW_PASSWORD} ]; then
+    log "BW_PASSWORD seems empty, asking for password"
+    ask_password "[${program_name}] bitwarden password: "
+    export BW_PASSWORD="${PASSWORD}"
+fi
+
+# Unlock bitwarden vault using BW_PASSWORD
+# Get BW_SESSION
+log "unlocking bitwarden vault"
+if ! export BW_SESSION="$(bw unlock --passwordenv BW_PASSWORD | grep -i "bw list items \-\-session" | cut -d " " -f 6)" || [ "${BW_SESSION}" == "" ]; then
+    error "failed to unlock bitwarden vault"
+    exit_all 1
+fi
+
+# Create secure temp dir
+temp_dir="$(get_temp bwbkp)"
+log "creating secure temporary dir '${temp_dir}'"
+if ! create_dir "${temp_dir}"; then
+    error "failed to create secure temporary directory"
+    exit_all 1
+fi
+
+# Export vault
+vault_file="${temp_dir}/vault.json"
+log "exporting vault to '${temp_dir}'"
+if ! bw export "${BW_PASSWORD}" --format json --output "${vault_file}"; then
+    error "failed to export vault to '${temp_dir}'"
+    exit_all 1
+fi
+
+# Encrypt vault
+log "encrypting vault to '${temp_dir}'"
+if ! echo "${BW_PASSWORD}" | gpg --batch --yes --passphrase-fd 0 --cipher-algo AES256 -c "${vault_file}"; then
+    error "failed to encrypt vault on '${temp_dir}'"
+    exit_all 1
+fi
+
+# Move encrypted vault to destination
+if ! mv -v "${vault_file}.gpg" "${destination}"; then
+    error "failed to move encrypted file to '${destination}'"
+    exit_all 1
+fi
+
+# Cleanup everything
+log "cleaning up"
+exit_all 0
